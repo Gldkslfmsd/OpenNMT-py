@@ -73,3 +73,13 @@ des artistes en train de travailler .
 
 - access it through our client or CURL
 
+
+## Useful links
+
+http://forum.opennmt.net/t/simple-opennmt-py-rest-server/1392
+
+- outdated tutorial on the server
+
+https://github.com/OpenNMT/OpenNMT-py/issues/810
+
+- updates are here
