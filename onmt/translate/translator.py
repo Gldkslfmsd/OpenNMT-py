@@ -46,8 +46,6 @@ def build_translator(opt, report_score=True, logger=None, out_file=None):
             {'src': model.src_vocabs[opt.src_lang],
              'tgt': model.tgt_vocabs[opt.tgt_lang]})
 
-        print(fields)
-
     scorer = onmt.translate.GNMTGlobalScorer(opt.alpha,
                                              opt.beta,
                                              opt.coverage_penalty,
@@ -782,8 +780,6 @@ def build_multisource_translator(opt, report_score=True, logger=None, out_file=N
             {'src': model.src_vocabs[opt.src_lang],
              'tgt': model.tgt_vocabs[opt.tgt_lang]})
 
-        print(fields)
-
     scorer = onmt.translate.GNMTGlobalScorer(opt.alpha,
                                              opt.beta,
                                              opt.coverage_penalty,
@@ -810,6 +806,8 @@ class MultiSourceTranslator(Translator):
 
     def __init__(self, *a, **kw):
         super(MultiSourceTranslator, self).__init__(*a, **kw)
+
+        self.tmp_out = []
 
     def translate(self,
                   src_path=None,
@@ -863,15 +861,32 @@ class MultiSourceTranslator(Translator):
             multisource = (i, sent)  # keep index to reconstruct original order of target sentences
             sources_sent[tuple(langs)].append(multisource)
 
-        print(sources_sent)
-
+        all_scores = []
+        all_predictions = []
+        all_indeces = []
         for lan_codes,multisources in sources_sent.items():
             src_data_iters = [ [ s[i] for _,s in multisources ] for i in range(len(lan_codes)) ]
-            print(src_data_iters)
-            self._translate_sources(lan_codes,
+            all_indeces += [ i for i,_ in multisources ]
+            scores, predictions = self._translate_sources(lan_codes,
                                     src_data_iters=src_data_iters,
                                     # passing the same arguments
                                     batch_size=batch_size, attn_debug=attn_debug,)
+            all_scores.extend(all_scores)
+            all_predictions.extend(predictions)
+
+
+        # unpacking list of lists of sentences into list of sentences
+        predictions = []
+        for pred in all_predictions:
+            predictions.extend(pred)
+        sorted_predictions = sorted(list(zip(all_indeces, predictions)),key=lambda x: x[0])
+        print(sorted_predictions[:10])
+
+        self.out_file.write('\n'.join(pred for _,pred in sorted_predictions) + '\n')
+        self.out_file.flush()
+
+        # this can be shuffled, if more encoder languages were used in the same file.
+        return all_scores, all_predictions
 
 
 
@@ -958,8 +973,9 @@ class MultiSourceTranslator(Translator):
                 n_best_preds = [" ".join(pred)
                                 for pred in trans.pred_sents[:self.n_best]]
                 all_predictions += [n_best_preds]
-                self.out_file.write('\n'.join(n_best_preds) + '\n')
-                self.out_file.flush()
+                # Dominik: the flushing of translated output was here. We need to sort them first.
+                #self.out_file.write('\n'.join(n_best_preds) + '\n')
+                #self.out_file.flush()
 
                 if self.verbose:
                     sent_number = next(counter)
@@ -1090,7 +1106,6 @@ class MultiSourceTranslator(Translator):
 
         ### Dominik's novel part: average enc_states and memory_bank
         enc_states = sum(states)/len(states)
-        print(memory_banks)
         memory_bank = sum(memory_banks)/len(memory_banks)
 
 
