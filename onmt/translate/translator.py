@@ -770,14 +770,8 @@ def build_multisource_translator(opt, report_score=True, logger=None, out_file=N
         # Chris: Note we currently just overwrite model and fields
         model = onmt.model_builder.load_test_multitask_model(opt)
 
-
-
-        ### Hack: src_vocabs and tgt_vocabs are the same, so we don't have to care...
-        opt.src_lang = "de"
-        opt.tgt_lang = "cs"
-
         fields = inputters.inputter.load_fields_from_vocab(
-            {'src': model.src_vocabs[opt.src_lang],
+            {'src': model.src_vocabs[opt.tgt_lang],  # hack: the vocabs are shared, so we don't have to care
              'tgt': model.tgt_vocabs[opt.tgt_lang]})
 
     scorer = onmt.translate.GNMTGlobalScorer(opt.alpha,
@@ -791,7 +785,8 @@ def build_multisource_translator(opt, report_score=True, logger=None, out_file=N
                         "ignore_when_blocking", "dump_beam", "report_bleu",
                         "data_type", "replace_unk", "gpu", "verbose", "fast"]}
 
-    translator = MultiSourceTranslator(model, opt.src_lang, opt.tgt_lang, fields, global_scorer=scorer,
+
+    translator = MultiSourceTranslator(model, None, opt.tgt_lang, fields, global_scorer=scorer,
                             out_file=out_file, report_score=report_score,
                             copy_attn=model_opt.copy_attn, logger=logger, use_attention_bridge=opt.use_attention_bridge,
                             **kwargs)
@@ -1087,6 +1082,7 @@ class MultiSourceTranslator(Translator):
 
         states = []
         memory_banks = []
+        d_states = []
         # (1) Run the encoder on the src.
         for enc_lan_code, batch in zip(sources, batches):
             src = inputters.make_features(batch, 'src', data_type)
@@ -1110,10 +1106,11 @@ class MultiSourceTranslator(Translator):
 
 
         # Raul: implement init_decoder_states for when -init_decoder flag is 'attention_matrix' while training
-        if self.model.init_decoder != "attention_matrix":
+        if self.model.init_decoder != "attention_matrix":  # Dominik: this variant is not supported in this class... not tested
             dec_states = self.model.decoders[self.model.decoder_ids[self.tgt_lang]].init_decoder_state(
                 src, memory_bank, enc_states)
         else:
+            ## src is not used inside, so we don't have to average dec_states after this
             dec_states = self.model.attention_bridge.init_decoder_state(src, memory_bank, enc_states)
 
         if src_lengths is None:
