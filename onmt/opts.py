@@ -559,6 +559,15 @@ def translate_multimodel(parser):
                        help="The 2-character target language code")
 
 
+def translate_multisource(parser):
+    # src and tgt langs for multi-encoder and multi-decoder models
+    group = parser.add_argument_group('Target Language')
+#    group.add_argument('-src_lang', required=True,
+#                       help="The 2-character source language code")
+    group.add_argument('-tgt_lang', required=True,
+                       help="The 2-character target language code")
+
+
 def add_md_help_argument(parser):
     """ md help parser """
     parser.add_argument('-md', action=MarkdownHelpAction,

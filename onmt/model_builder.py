@@ -137,6 +137,16 @@ def load_test_multitask_model(opt, model_path=None):
     model.eval()
     return model
 
+def load_test_multisource_model(opt, model_path=None):
+    if model_path is None:
+        model_path = opt.models[0]
+    checkpoint = torch.load(model_path,
+                            map_location=lambda storage, loc: storage)
+    orig_model = checkpoint['whole_model']
+
+
+
+
 
 def load_test_model(opt, dummy_opt, model_path=None):
     if model_path is None:
@@ -324,3 +334,7 @@ def build_model(model_opt, opt, fields, checkpoint):
                              use_gpu(opt), checkpoint)
     logger.info(model)
     return model
+
+
+def build_multisource_model(multitask_model):
+    return multitask_model

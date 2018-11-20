@@ -9,6 +9,7 @@ import math
 import torch
 
 from itertools import count
+from collections import defaultdict
 from onmt.utils.misc import tile
 
 import onmt.model_builder
@@ -36,8 +37,8 @@ def build_translator(opt, report_score=True, logger=None, out_file=None):
         fields, model, model_opt = \
             onmt.decoders.ensemble.load_test_model(opt, dummy_opt.__dict__)
     else:
-        fields, model, model_opt = \
-           onmt.model_builder.load_test_model(opt, dummy_opt.__dict__)
+        #fields, model, model_opt = \
+        #   onmt.model_builder.load_test_model(opt, dummy_opt.__dict__)
 
         # Chris: Note we currently just overwrite model and fields
         model = onmt.model_builder.load_test_multitask_model(opt)
@@ -45,6 +46,7 @@ def build_translator(opt, report_score=True, logger=None, out_file=None):
             {'src': model.src_vocabs[opt.src_lang],
              'tgt': model.tgt_vocabs[opt.tgt_lang]})
 
+        print(fields)
 
     scorer = onmt.translate.GNMTGlobalScorer(opt.alpha,
                                              opt.beta,
@@ -742,3 +744,441 @@ class Translator(object):
             stdin=self.out_file).decode("utf-8")
         msg = res.strip()
         return msg
+
+
+
+def build_multisource_translator(opt, report_score=True, logger=None, out_file=None):
+
+    if out_file is None:
+        out_file = codecs.open(opt.output, 'w+', 'utf-8')
+
+    if opt.gpu > -1:
+        torch.cuda.set_device(opt.gpu)
+
+    dummy_parser = argparse.ArgumentParser(description='train.py')
+    opts.model_opts(dummy_parser)
+    dummy_opt = dummy_parser.parse_known_args([])[0]
+
+    # TODO: support ensembles and single models
+    if len(opt.models) > 1:
+        # use ensemble decoding if more than one model is specified
+        fields, model, model_opt = \
+            onmt.decoders.ensemble.load_test_model(opt, dummy_opt.__dict__)
+    else:
+        #
+        fields, model, model_opt = \
+           onmt.model_builder.load_test_model(opt, dummy_opt.__dict__)
+
+        # Chris: Note we currently just overwrite model and fields
+        model = onmt.model_builder.load_test_multitask_model(opt)
+
+
+
+        ### Hack: src_vocabs and tgt_vocabs are the same, so we don't have to care...
+        opt.src_lang = "de"
+        opt.tgt_lang = "cs"
+
+        fields = inputters.inputter.load_fields_from_vocab(
+            {'src': model.src_vocabs[opt.src_lang],
+             'tgt': model.tgt_vocabs[opt.tgt_lang]})
+
+        print(fields)
+
+    scorer = onmt.translate.GNMTGlobalScorer(opt.alpha,
+                                             opt.beta,
+                                             opt.coverage_penalty,
+                                             opt.length_penalty)
+
+    kwargs = {k: getattr(opt, k)
+              for k in ["beam_size", "n_best", "max_length", "min_length",
+                        "stepwise_penalty", "block_ngram_repeat",
+                        "ignore_when_blocking", "dump_beam", "report_bleu",
+                        "data_type", "replace_unk", "gpu", "verbose", "fast"]}
+
+    translator = MultiSourceTranslator(model, opt.src_lang, opt.tgt_lang, fields, global_scorer=scorer,
+                            out_file=out_file, report_score=report_score,
+                            copy_attn=model_opt.copy_attn, logger=logger, use_attention_bridge=opt.use_attention_bridge,
+                            **kwargs)
+    return translator
+
+
+
+
+class MultiSourceTranslator(Translator):
+
+
+
+    def __init__(self, *a, **kw):
+        super(MultiSourceTranslator, self).__init__(*a, **kw)
+
+    def translate(self,
+                  src_path=None,
+                  src_data_iter=None,
+                  tgt_path=None,
+                  tgt_data_iter=None,
+                  src_dir=None,
+                  batch_size=None,
+                  attn_debug=False):
+        """
+        Translate content of `src_data_iter` (if not None) or `src_path`
+        and get gold scores if one of `tgt_data_iter` or `tgt_path` is set.
+
+        Note: batch_size must not be None
+        Note: one of ('src_path', 'src_data_iter') must not be None
+
+        Args:
+            src_path (str): filepath of source data
+            src_data_iter (iterator): an interator generating source data
+                e.g. it may be a list or an openned file
+            tgt_path (str): filepath of target data
+            tgt_data_iter (iterator): an iterator generating target data
+            src_dir (str): source directory path
+                (used for Audio and Image datasets)
+            batch_size (int): size of examples per mini-batch
+            attn_debug (bool): enables the attention logging
+
+        Returns:
+            (`list`, `list`)
+
+            * all_scores is a list of `batch_size` lists of `n_best` scores
+            * all_predictions is a list of `batch_size` lists
+                of `n_best` predictions
+        """
+
+#        assert src_data_iter is not None or src_path is not None
+        assert src_data_iter is None, "input through src_data_iter is not implemented"
+
+        #####
+        # transform multisource-file into data
+
+
+        with open(src_path, "r") as src_file:
+            lines = [ l.decode("utf-8") for l in src_file.readlines() ]
+
+        sources_sent = defaultdict(lambda: [])
+        for i,line in enumerate(lines):
+            spl = line.strip().split("\t")
+            langs = spl[0].split()
+            sent = spl[1:]
+            multisource = (i, sent)  # keep index to reconstruct original order of target sentences
+            sources_sent[tuple(langs)].append(multisource)
+
+        print(sources_sent)
+
+        for lan_codes,multisources in sources_sent.items():
+            src_data_iters = [ [ s[i] for _,s in multisources ] for i in range(len(lan_codes)) ]
+            print(src_data_iters)
+            self._translate_sources(lan_codes,
+                                    src_data_iters=src_data_iters,
+                                    # passing the same arguments
+                                    batch_size=batch_size, attn_debug=attn_debug,)
+
+
+
+
+    def _translate_sources(self, sources,
+                  src_data_iters=None,
+                  tgt_path=None,
+                  tgt_data_iter=None,
+                  src_dir=None,
+                  batch_size=None,
+                  attn_debug=False):
+        """
+        :param sources: tuple of language codes
+        :param src_data_iters: list of iters for sentences for each source
+        :param tgt_path: TODO: not implemented
+        :param tgt_data_iter: TODO: not impolemented
+        :param src_dir: TODO: not implemented
+        :param batch_size (int): size of examples per mini-batch
+        :param attn_debug (bool): enables the attention logging
+        :return:
+        """
+
+        if batch_size is None:
+            raise ValueError("batch_size must be set")
+
+        if self.cuda:
+            cur_device = "cuda"
+        else:
+            cur_device = "cpu"
+
+
+        data = []
+        data_iters = []
+#        builders = []
+        for source_lan, src_data_iter in zip(sources, src_data_iters):
+            d = inputters.build_dataset(self.fields,
+                                           self.data_type,
+                                           src_path=None,
+                                           src_data_iter=src_data_iter,
+                                           tgt_path=tgt_path,
+                                           tgt_data_iter=tgt_data_iter,
+                                           src_dir=src_dir,
+                                           sample_rate=self.sample_rate,
+                                           window_size=self.window_size,
+                                           window_stride=self.window_stride,
+                                           window=self.window,
+                                           use_filter_pred=self.use_filter_pred)
+            data.append(d)
+
+
+            data_iter = inputters.OrderedIterator(
+                dataset=d, device=cur_device,
+                batch_size=batch_size, train=False, sort=False,
+                sort_within_batch=True, shuffle=False)
+            data_iters.append(data_iter)
+
+        builder = onmt.translate.TranslationBuilder(
+            d, self.fields,
+            self.n_best, self.replace_unk, tgt_path)
+        #    builders.append(builder)
+
+        # Statistics
+        counter = count(1)
+        pred_score_total, pred_words_total = 0, 0
+        gold_score_total, gold_words_total = 0, 0
+
+        all_scores = []
+        all_predictions = []
+
+
+        for batches in zip(*data_iters):
+            self.src_lang = sources
+            batch_data = self.translate_batch(batches, data, fast=self.fast)
+            translations = builder.from_batch(batch_data)
+
+            for trans in translations:
+                all_scores += [trans.pred_scores[:self.n_best]]
+                pred_score_total += trans.pred_scores[0]
+                pred_words_total += len(trans.pred_sents[0])
+                if tgt_path is not None:
+                    gold_score_total += trans.gold_score
+                    gold_words_total += len(trans.gold_sent) + 1
+
+                n_best_preds = [" ".join(pred)
+                                for pred in trans.pred_sents[:self.n_best]]
+                all_predictions += [n_best_preds]
+                self.out_file.write('\n'.join(n_best_preds) + '\n')
+                self.out_file.flush()
+
+                if self.verbose:
+                    sent_number = next(counter)
+                    output = trans.log(sent_number)
+                    if self.logger:
+                        self.logger.info(output)
+                    else:
+                        os.write(1, output.encode('utf-8'))
+
+                # Debug attention.
+                if attn_debug:
+                    srcs = trans.src_raw
+                    preds = trans.pred_sents[0]
+                    preds.append('</s>')
+                    attns = trans.attns[0].tolist()
+                    header_format = "{:>10.10} " + "{:>10.7} " * len(srcs)
+                    row_format = "{:>10.10} " + "{:>10.7f} " * len(srcs)
+                    output = header_format.format("", *trans.src_raw) + '\n'
+                    for word, row in zip(preds, attns):
+                        max_index = row.index(max(row))
+                        row_format = row_format.replace(
+                            "{:>10.7f} ", "{:*>10.7f} ", max_index + 1)
+                        row_format = row_format.replace(
+                            "{:*>10.7f} ", "{:>10.7f} ", max_index)
+                        output += row_format.format(word, *row) + '\n'
+                        row_format = "{:>10.10} " + "{:>10.7f} " * len(srcs)
+                    os.write(1, output.encode('utf-8'))
+
+        if self.report_score:
+            msg = self._report_score('PRED', pred_score_total,
+                                     pred_words_total)
+            if self.logger:
+                self.logger.info(msg)
+            else:
+                print(msg)
+            if tgt_path is not None:
+                msg = self._report_score('GOLD', gold_score_total,
+                                         gold_words_total)
+                if self.logger:
+                    self.logger.info(msg)
+                else:
+                    print(msg)
+                if self.report_bleu:
+                    msg = self._report_bleu(tgt_path)
+                    if self.logger:
+                        self.logger.info(msg)
+                    else:
+                        print(msg)
+                if self.report_rouge:
+                    msg = self._report_rouge(tgt_path)
+                    if self.logger:
+                        self.logger.info(msg)
+                    else:
+                        print(msg)
+
+        if self.dump_beam:
+            import json
+            json.dump(self.translator.beam_accum,
+                      codecs.open(self.dump_beam, 'w', 'utf-8'))
+        return all_scores, all_predictions
+
+    def _translate_batch(self, batches, data):
+        """
+        Unlike in the base class, batches and data are tuples of batch and data classes, one for each source.
+        Assumes self.src_lang is a tuple of encoder-codes.
+
+        :param batches: list of batch objects, one for each encoder
+        :param data: list of data objects
+        :return:
+        """
+        # (0) Prep each of the components of the search.
+        # And helper method for reducing verbosity.
+        beam_size = self.beam_size
+        batch_size = batches[0].batch_size
+        sources = self.src_lang
+        data_type = data[0].data_type
+        vocab = self.fields["tgt"].vocab
+
+        # Define a list of tokens to exclude from ngram-blocking
+        # exclusion_list = ["<t>", "</t>", "."]
+        exclusion_tokens = set([vocab.stoi[t]
+                                for t in self.ignore_when_blocking])
+
+        beam = [onmt.translate.Beam(beam_size, n_best=self.n_best,
+                                    cuda=self.cuda,
+                                    global_scorer=self.global_scorer,
+                                    pad=vocab.stoi[inputters.PAD_WORD],
+                                    eos=vocab.stoi[inputters.EOS_WORD],
+                                    bos=vocab.stoi[inputters.BOS_WORD],
+                                    min_length=self.min_length,
+                                    stepwise_penalty=self.stepwise_penalty,
+                                    block_ngram_repeat=self.block_ngram_repeat,
+                                    exclusion_tokens=exclusion_tokens)
+                for __ in range(batch_size)]
+
+        # Help functions for working with beams and batches
+        def var(a):
+            return torch.tensor(a, requires_grad=False)
+
+        def rvar(a):
+            return var(a.repeat(1, beam_size, 1))
+
+        def bottle(m):
+            return m.view(batch_size * beam_size, -1)
+
+        def unbottle(m):
+            return m.view(beam_size, batch_size, -1)
+
+
+        states = []
+        memory_banks = []
+        # (1) Run the encoder on the src.
+        for enc_lan_code, batch in zip(sources, batches):
+            src = inputters.make_features(batch, 'src', data_type)
+            src_lengths = None
+            if data_type == 'text':
+                _, src_lengths = batch.src
+
+            # enc_states, memory_bank = self.model.encoder(src, src_lengths)
+            enc_states, memory_bank = self.model.encoders[self.model.encoder_ids[enc_lan_code]](src, src_lengths)
+
+            # run through attention bridge/compound attention
+            if self.use_attention_bridge:
+                enc_states, memory_bank = self.model.attention_bridge(memory_bank)
+
+            states.append(enc_states)
+            memory_banks.append(memory_bank)
+
+        ### Dominik's novel part: average enc_states and memory_bank
+        enc_states = sum(states)/len(states)
+        print(memory_banks)
+        memory_bank = sum(memory_banks)/len(memory_banks)
+
+
+        # Raul: implement init_decoder_states for when -init_decoder flag is 'attention_matrix' while training
+        if self.model.init_decoder != "attention_matrix":
+            dec_states = self.model.decoders[self.model.decoder_ids[self.tgt_lang]].init_decoder_state(
+                src, memory_bank, enc_states)
+        else:
+            dec_states = self.model.attention_bridge.init_decoder_state(src, memory_bank, enc_states)
+
+        if src_lengths is None:
+            assert not isinstance(memory_bank, tuple), \
+                'Ensemble decoding only supported for text data'
+            src_lengths = torch.Tensor(batch_size).type_as(memory_bank.data) \
+                .long() \
+                .fill_(memory_bank.size(0))
+
+        # (2) Repeat src objects `beam_size` times.
+        src_map = rvar(batch.src_map.data) \
+            if data_type == 'text' and self.copy_attn else None
+        if isinstance(memory_bank, tuple):
+            memory_bank = tuple(rvar(x.data) for x in memory_bank)
+        else:
+            memory_bank = rvar(memory_bank.data)
+        memory_lengths = src_lengths.repeat(beam_size)
+        dec_states.repeat_beam_size_times(beam_size)
+
+        # (3) run the decoder to generate sentences, using beam search.
+        for i in range(self.max_length):
+            if all((b.done() for b in beam)):
+                break
+
+            # Construct batch x beam_size nxt words.
+            # Get all the pending current beam words and arrange for forward.
+            inp = var(torch.stack([b.get_current_state() for b in beam])
+                      .t().contiguous().view(1, -1))
+
+            # Turn any copied words to UNKs
+            # 0 is unk
+            if self.copy_attn:
+                inp = inp.masked_fill(
+                    inp.gt(len(self.fields["tgt"].vocab) - 1), 0)
+
+            # Temporary kludge solution to handle changed dim expectation
+            # in the decoder
+            inp = inp.unsqueeze(2)
+
+            # Run one step.
+            dec_out, dec_states, attn = self.model.decoders[self.model.decoder_ids[self.tgt_lang]](
+                inp, memory_bank, dec_states,
+                memory_lengths=memory_lengths,
+                step=i)
+
+            dec_out = dec_out.squeeze(0)
+
+            # dec_out: beam x rnn_size
+
+            # (b) Compute a vector of batch x beam word scores.
+            if not self.copy_attn:
+                # Chris: note model.generators are in the same order as model.decoders
+                out = self.model.generators[self.model.decoder_ids[self.tgt_lang]].forward(dec_out).data
+                out = unbottle(out)
+                # beam x tgt_vocab
+                beam_attn = unbottle(attn["std"])
+            else:
+                # Chris: note model.generators are in the same order as model.decoders
+                out = self.model.generators[self.model.decoder_ids[self.tgt_lang]].forward(dec_out,
+                                                                                           attn["copy"].squeeze(0),
+                                                                                           src_map)
+                # beam x (tgt_vocab + extra_vocab)
+                out = data.collapse_copy_scores(
+                    unbottle(out.data),
+                    batch, self.fields["tgt"].vocab, data.src_vocabs)
+                # beam x tgt_vocab
+                out = out.log()
+                beam_attn = unbottle(attn["copy"])
+
+            # (c) Advance each beam.
+            for j, b in enumerate(beam):
+                b.advance(out[:, j],
+                          beam_attn.data[:, j, :memory_lengths[j]])
+                dec_states.beam_update(j, b.get_current_origin(), beam_size)
+
+        # (4) Extract sentences from beam.
+        ret = self._from_beam(beam)
+        ret["gold_score"] = [0] * batch_size
+        if "tgt" in batch.__dict__:
+            ret["gold_score"] = self._run_target(batch, data)
+        ret["batch"] = batch
+
+        return ret
