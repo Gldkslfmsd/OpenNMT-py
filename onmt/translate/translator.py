@@ -786,7 +786,7 @@ def build_multisource_translator(opt, report_score=True, logger=None, out_file=N
                         "data_type", "replace_unk", "gpu", "verbose", "fast"]}
 
 
-    translator = MultiSourceTranslator(model, None, opt.tgt_lang, fields, global_scorer=scorer,
+    translator = MultiSourceTranslator(model, opt.src_lang, opt.tgt_lang, fields, global_scorer=scorer,
                             out_file=out_file, report_score=report_score,
                             copy_attn=model_opt.copy_attn, logger=logger, use_attention_bridge=opt.use_attention_bridge,
                             **kwargs)
@@ -801,8 +801,6 @@ class MultiSourceTranslator(Translator):
 
     def __init__(self, *a, **kw):
         super(MultiSourceTranslator, self).__init__(*a, **kw)
-
-        self.tmp_out = []
 
     def translate(self,
                   src_path=None,
@@ -851,8 +849,12 @@ class MultiSourceTranslator(Translator):
         sources_sent = defaultdict(lambda: [])
         for i,line in enumerate(lines):
             spl = line.strip().split("\t")
-            langs = spl[0].split()
-            sent = spl[1:]
+            if self.src_lang is not None:
+                langs = self.src_lang
+                sent = spl
+            else:
+                langs = spl[0].split()
+                sent = spl[1:]
             multisource = (i, sent)  # keep index to reconstruct original order of target sentences
             sources_sent[tuple(langs)].append(multisource)
 

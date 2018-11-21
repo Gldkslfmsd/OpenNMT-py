@@ -562,8 +562,11 @@ def translate_multimodel(parser):
 def translate_multisource(parser):
     # src and tgt langs for multi-encoder and multi-decoder models
     group = parser.add_argument_group('Target Language')
-#    group.add_argument('-src_lang', required=True,
-#                       help="The 2-character source language code")
+    group.add_argument('-src_lang',
+                       nargs="*",
+                       help="Space delimited 2-character source languages codes. If given, source file lines are considered as "
+                            "tuples of sentences in the source languages delimited by tabs. "
+                            "If not given, the source language codes for each line are in the first column of the source file.")
     group.add_argument('-tgt_lang', required=True,
                        help="The 2-character target language code")
 
