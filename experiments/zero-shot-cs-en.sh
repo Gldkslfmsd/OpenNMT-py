@@ -31,10 +31,12 @@ python ../train.py -data $DATA/de-cs/data \
              -dec_layers 2 \
              -word_vec_size 512 \
              -global_attention mlp \
-             -train_steps 100000 \
-             -valid_steps 10000 \
+             -train_steps 30000 \
+             -valid_steps 1000 \
              -optim adam \
              -learning_rate 0.0002 \
              -batch_size 256 \
              -gpuid 0 \
-             -save_checkpoint_steps 10000
+             -save_checkpoint_steps 1000 \
+	     -report_bleu \
+	-init_decoder attention_matrix
